@@ -1,4 +1,4 @@
-
+.rsyncignore
 .env
 *.log
 npm-debug.log*
@@ -13,3 +13,4 @@ firebase-admin-key.json
 node_modules/
 docs/
 backups/
+.rsyncignore
