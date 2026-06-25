@@ -48,6 +48,8 @@ CREATE TABLE device_tokens (
     address VARCHAR(100) NOT NULL,
     device_token TEXT NOT NULL,
     platform VARCHAR(10) DEFAULT 'android',
+    price_alerts_enabled BOOLEAN DEFAULT FALSE,
+    chat_notifications_enabled BOOLEAN DEFAULT TRUE,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     last_active TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     UNIQUE(address, device_token)

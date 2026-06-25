@@ -373,15 +373,31 @@ async function cleanupOldPriceHistory() {
 /**
  * Save a chat message
  */
-async function saveChatMessage({ wallet_address, nickname, message, message_type = 'user' }) {
+async function saveChatMessage({ 
+  wallet_address, 
+  nickname, 
+  message, 
+  message_type = 'user',
+  reply_to_id = null,
+  reply_to_text = null,
+  reply_to_user = null
+}) {
   const query = `
-    INSERT INTO chat_messages (wallet_address, nickname, message, message_type, timestamp)
-    VALUES ($1, $2, $3, $4, CURRENT_TIMESTAMP)
-    RETURNING id, wallet_address, nickname, message, message_type, timestamp
+    INSERT INTO chat_messages (
+      wallet_address, nickname, message, message_type, timestamp, 
+      reply_to_id, reply_to_text, reply_to_user
+    )
+    VALUES ($1, $2, $3, $4, CURRENT_TIMESTAMP, $5, $6, $7)
+    RETURNING id, wallet_address, nickname, message, message_type, 
+              TO_CHAR(timestamp AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') as timestamp,
+              reply_to_id, reply_to_text, reply_to_user
   `;
 
   try {
-    const result = await pool.query(query, [wallet_address, nickname, message, message_type]);
+    const result = await pool.query(query, [
+      wallet_address, nickname, message, message_type, 
+      reply_to_id, reply_to_text, reply_to_user
+    ]);
     logger.info('Chat message saved', {
       id: result.rows[0].id,
       sender: wallet_address.substring(0, 10) + '...'
@@ -398,9 +414,11 @@ async function saveChatMessage({ wallet_address, nickname, message, message_type
  */
 async function getChatHistory(limit = 100, offset = 0) {
   const query = `
-    SELECT id, wallet_address, nickname, message, message_type, timestamp
+    SELECT id, wallet_address, nickname, message, message_type, 
+           TO_CHAR(timestamp AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') as timestamp,
+           reply_to_id, reply_to_text, reply_to_user
     FROM chat_messages
-    ORDER BY timestamp DESC
+    ORDER BY timestamp DESC, id DESC
     LIMIT $1 OFFSET $2
   `;
 
@@ -473,6 +491,63 @@ async function getAllDeviceTokens() {
 }
 
 /**
+ * Delete all messages from a specific nickname (admin/moderation)
+ */
+async function deleteMessagesByNickname(nickname) {
+  // First get the wallet address for this nickname
+  const getAddressQuery = 'SELECT wallet_address FROM user_nicknames WHERE nickname = $1';
+  
+  try {
+    const addressResult = await pool.query(getAddressQuery, [nickname]);
+    let walletAddress = null;
+    let userExists = false;
+
+    if (addressResult.rows.length > 0) {
+      walletAddress = addressResult.rows[0].wallet_address;
+      userExists = true;
+    }
+
+    // Even if not in user_nicknames, check if they exist in chat_messages
+    const checkChatQuery = 'SELECT COUNT(*) FROM chat_messages WHERE nickname = $1 OR wallet_address = $1';
+    const chatCheck = await pool.query(checkChatQuery, [nickname]);
+    const chatCount = parseInt(chatCheck.rows[0].count);
+
+    if (chatCount > 0) {
+      userExists = true;
+    }
+
+    if (!userExists) {
+      return { found: false, count: 0 };
+    }
+
+    // Delete by wallet address if found, otherwise by nickname string
+    let deleteQuery;
+    let params;
+    
+    if (walletAddress) {
+      deleteQuery = 'DELETE FROM chat_messages WHERE wallet_address = $1';
+      params = [walletAddress];
+    } else {
+      deleteQuery = 'DELETE FROM chat_messages WHERE nickname = $1';
+      params = [nickname];
+    }
+
+    const result = await pool.query(deleteQuery, params);
+    
+    logger.info('All messages from user deleted', { 
+      nickname, 
+      address: walletAddress ? walletAddress.substring(0, 10) + '...' : 'N/A',
+      count: result.rowCount 
+    });
+    
+    return { found: true, count: result.rowCount };
+  } catch (error) {
+    logger.error('Failed to delete messages by nickname', { error: error.message, nickname });
+    throw error;
+  }
+}
+
+/**
  * Delete a chat message (admin/moderation)
  */
 async function deleteChatMessage(messageId) {
@@ -517,8 +592,61 @@ async function getChatStats() {
   }
 }
 
+/**
+ * Ensure the database schema is up to date (Auto-migration)
+ * This adds missing columns without breaking existing data
+ */
+async function ensureSchema() {
+  try {
+    logger.info('Checking database schema...');
+
+    // 1. Check if price_alerts_enabled exists
+    const priceAlertsCheck = await pool.query(`
+      SELECT column_name FROM information_schema.columns 
+      WHERE table_name='device_tokens' AND column_name='price_alerts_enabled'
+    `);
+    
+    if (priceAlertsCheck.rows.length === 0) {
+      logger.info('Adding missing column: price_alerts_enabled');
+      await pool.query('ALTER TABLE device_tokens ADD COLUMN price_alerts_enabled BOOLEAN DEFAULT false');
+    }
+
+    // 2. Check if chat_notifications_enabled exists
+    const chatNotificationsCheck = await pool.query(`
+      SELECT column_name FROM information_schema.columns 
+      WHERE table_name='device_tokens' AND column_name='chat_notifications_enabled'
+    `);
+    
+    if (chatNotificationsCheck.rows.length === 0) {
+      logger.info('Adding missing column: chat_notifications_enabled');
+      await pool.query('ALTER TABLE device_tokens ADD COLUMN chat_notifications_enabled BOOLEAN DEFAULT true');
+    }
+
+    // 3. Check for chat reply columns
+    const chatReplyCheck = await pool.query(`
+      SELECT column_name FROM information_schema.columns 
+      WHERE table_name='chat_messages' AND column_name='reply_to_id'
+    `);
+
+    if (chatReplyCheck.rows.length === 0) {
+      logger.info('Adding missing chat reply columns: reply_to_id, reply_to_text, reply_to_user');
+      await pool.query('ALTER TABLE chat_messages ADD COLUMN reply_to_id VARCHAR(50)');
+      await pool.query('ALTER TABLE chat_messages ADD COLUMN reply_to_text TEXT');
+      await pool.query('ALTER TABLE chat_messages ADD COLUMN reply_to_user VARCHAR(50)');
+    }
+
+    logger.info('Database schema is up to date');
+    return true;
+  } catch (error) {
+    logger.error('Failed to ensure schema consistency', { error: error.message });
+    // Don't throw, let the app try to start anyway
+    return false;
+  }
+}
+
 module.exports = {
   pool,
+  ensureSchema,
   registerDevice,
   getDeviceTokensByAddress,
   unregisterDevice,
@@ -541,6 +669,7 @@ module.exports = {
   getUserNickname,
   getAllDeviceTokens,
   deleteChatMessage,
+  deleteMessagesByNickname,
   getChatStats,
   updateChatNotificationStatus,
   getDevicesWithChatNotifications,

@@ -6,6 +6,14 @@ require('dotenv').config();
 const LIVECOINWATCH_API_URL = 'https://api.livecoinwatch.com/coins/single';
 const LIVECOINWATCH_API_KEY = process.env.LIVECOINWATCH_API_KEY;
 const BTCS_CODE = '____BTCS';
+const BTC_CODE = 'BTC';
+
+// Cache for prices to avoid over-calling API
+let priceCache = {
+  BTCS: { price: null, lastUpdate: 0 },
+  BTC: { price: null, lastUpdate: 0 }
+};
+const CACHE_TTL = 5 * 60 * 1000; // 5 minutes
 
 // Warn if API key is not configured
 if (!LIVECOINWATCH_API_KEY) {
@@ -13,18 +21,25 @@ if (!LIVECOINWATCH_API_KEY) {
 }
 
 /**
- * Fetch current BTCS price from LiveCoinWatch
- * @returns {Promise<{price: number, change24h: number|null}>}
+ * Fetch a specific coin price from LiveCoinWatch
+ * @param {string} code 
+ * @returns {Promise<number|null>}
  */
-async function fetchBTCSPrice() {
+async function fetchCoinPrice(code) {
   try {
-    logger.debug('Fetching BTCS price from LiveCoinWatch...');
+    // Check cache first
+    const now = Date.now();
+    if (priceCache[code] && priceCache[code].price && (now - priceCache[code].lastUpdate < CACHE_TTL)) {
+      return priceCache[code].price;
+    }
+
+    logger.debug(`Fetching ${code} price from LiveCoinWatch...`);
 
     const response = await axios.post(
       LIVECOINWATCH_API_URL,
       {
         currency: 'USD',
-        code: BTCS_CODE,
+        code: code,
         meta: true
       },
       {
@@ -38,46 +53,54 @@ async function fetchBTCSPrice() {
 
     if (response.status === 200 && response.data) {
       const data = response.data;
-
-      // LiveCoinWatch returns the price in 'rate' field
       const price = data.rate ? parseFloat(data.rate) : null;
 
-      if (price === null) {
-        logger.warn('LiveCoinWatch response missing price data');
-        return null;
+      if (price !== null) {
+        priceCache[code] = {
+          price: price,
+          lastUpdate: now
+        };
+        logger.info(`${code} price fetched successfully`, {
+          price: formatPrice(price),
+          source: 'livecoinwatch'
+        });
+        return price;
       }
-
-      logger.info('BTCS price fetched successfully', {
-        price: `$${price.toFixed(8)}`,
-        source: 'livecoinwatch'
-      });
-
-      return {
-        price: price,
-        change24h: null // LiveCoinWatch might provide this, check response
-      };
-    } else {
-      logger.error('LiveCoinWatch API returned unexpected status', {
-        status: response.status
-      });
-      return null;
-    }
-
-  } catch (error) {
-    if (error.code === 'ECONNABORTED') {
-      logger.error('LiveCoinWatch API request timed out');
-    } else if (error.response) {
-      logger.error('LiveCoinWatch API error', {
-        status: error.response.status,
-        data: error.response.data
-      });
-    } else {
-      logger.error('Failed to fetch BTCS price', {
-        error: error.message
-      });
     }
     return null;
+  } catch (error) {
+    logger.error(`Failed to fetch ${code} price`, { error: error.message });
+    return priceCache[code] ? priceCache[code].price : null; // Return stale cache if error
   }
+}
+
+/**
+ * Fetch current BTCS price
+ * @returns {Promise<{price: number, change24h: number|null}>}
+ */
+async function fetchBTCSPrice() {
+  const price = await fetchCoinPrice(BTCS_CODE);
+  return price ? { price, change24h: null } : null;
+}
+
+/**
+ * Fetch current BTC price
+ * @returns {Promise<number|null>}
+ */
+async function fetchBTCPrice() {
+  return await fetchCoinPrice(BTC_CODE);
+}
+
+/**
+ * Get latest prices for both BTCS and BTC
+ * @returns {Promise<{BTCS: number|null, BTC: number|null}>}
+ */
+async function getLatestPrices() {
+  const [btcs, btc] = await Promise.all([
+    fetchCoinPrice(BTCS_CODE),
+    fetchCoinPrice(BTC_CODE)
+  ]);
+  return { BTCS: btcs, BTC: btc };
 }
 
 /**
@@ -86,10 +109,13 @@ async function fetchBTCSPrice() {
  * @returns {string}
  */
 function formatPrice(price) {
+  if (price === null || price === undefined) return 'N/A';
   if (price < 0.01) {
     return `$${price.toFixed(8)}`;
   } else if (price < 1) {
     return `$${price.toFixed(4)}`;
+  } else if (price > 1000) {
+    return `$${price.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
   } else {
     return `$${price.toFixed(2)}`;
   }
@@ -97,5 +123,7 @@ function formatPrice(price) {
 
 module.exports = {
   fetchBTCSPrice,
+  fetchBTCPrice,
+  getLatestPrices,
   formatPrice
 };

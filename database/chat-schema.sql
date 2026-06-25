@@ -13,7 +13,10 @@ CREATE TABLE IF NOT EXISTS chat_messages (
     nickname VARCHAR(50),
     message TEXT NOT NULL,
     timestamp TIMESTAMP DEFAULT NOW(),
-    message_type VARCHAR(20) DEFAULT 'user'
+    message_type VARCHAR(20) DEFAULT 'user',
+    reply_to_id VARCHAR(50),
+    reply_to_text TEXT,
+    reply_to_user VARCHAR(50)
 );
 
 -- Index for fast timestamp-based queries (newest first)

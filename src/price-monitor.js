@@ -1,5 +1,5 @@
 const logger = require('./logger');
-const { fetchBTCSPrice, formatPrice } = require('./price-api');
+const { fetchBTCSPrice, getLatestPrices, formatPrice } = require('./price-api');
 const {
   savePriceHistory,
   getPrice24hAgo,
@@ -32,16 +32,16 @@ function calculatePercentChange(oldPrice, newPrice) {
  */
 async function checkPriceAndAlert() {
   try {
-    logger.debug('Checking BTCS price...');
+    logger.debug('Checking prices...');
 
-    // Fetch current price
-    const priceData = await fetchBTCSPrice();
-    if (!priceData || !priceData.price) {
-      logger.warn('Failed to fetch current price, skipping check');
+    // Fetch latest prices for both (keeps cache fresh and logs both)
+    const prices = await getLatestPrices();
+    const currentPrice = prices.BTCS;
+
+    if (!currentPrice) {
+      logger.warn('Failed to fetch BTCS price, skipping check');
       return;
     }
-
-    const currentPrice = priceData.price;
 
     // Save to history
     await savePriceHistory(currentPrice);
@@ -247,7 +247,7 @@ function scheduleDailyBroadcast() {
 /**
  * Start price monitoring service
  */
-function startMonitoring() {
+async function startMonitoring() {
   if (isMonitoring) {
     logger.warn('Price monitoring already running');
     return;
@@ -259,8 +259,13 @@ function startMonitoring() {
     cooldown: `${COOLDOWN_HOURS} hours`
   });
 
-  // Run immediately on start
-  checkPriceAndAlert();
+  // Run immediately on start - Fetch both for logging/caching
+  try {
+    await getLatestPrices();
+    await checkPriceAndAlert();
+  } catch (error) {
+    logger.error('Error during price monitoring startup', { error: error.message });
+  }
 
   // Then run at intervals
   monitoringInterval = setInterval(checkPriceAndAlert, CHECK_INTERVAL_MS);
