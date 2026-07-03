@@ -13,4 +13,5 @@ firebase-admin-key.json
 node_modules/
 docs/
 backups/
+debug/
 .rsyncignore

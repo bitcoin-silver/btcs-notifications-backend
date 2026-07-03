@@ -112,7 +112,13 @@ function createWebSocketServer(server) {
   });
 
   wss.on("connection", (ws, req) => {
-    const clientIp = req.headers["x-forwarded-for"] || req.socket.remoteAddress;
+    const forwardedFor = req.headers["x-forwarded-for"];
+    const forwardedIp = Array.isArray(forwardedFor)
+      ? forwardedFor[0]
+      : String(forwardedFor || "")
+          .split(",")[0]
+          .trim();
+    const clientIp = forwardedIp || req.socket.remoteAddress;
     let walletAddress = null;
     ws.isVerified = false;
 
@@ -553,7 +559,7 @@ async function sendPushToOfflineUsers(message) {
     }
 
     // Prepare notification (all data values must be strings for FCM)
-    const preview = message.message.substring(0, 105) + " ...";
+    const preview = message.message.substring(0, 205) + " ...";
 
     const notification = {
       title: "💬 New BTCS chat message !",

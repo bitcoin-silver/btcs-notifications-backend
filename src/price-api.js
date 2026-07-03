@@ -111,13 +111,13 @@ async function getLatestPrices() {
 function formatPrice(price) {
   if (price === null || price === undefined) return 'N/A';
   if (price < 0.01) {
-    return `$${price.toFixed(8)}`;
+    return `${price.toFixed(8)} $`;
   } else if (price < 1) {
-    return `$${price.toFixed(4)}`;
+    return `${price.toFixed(4)} $`;
   } else if (price > 1000) {
-    return `$${price.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+    return `${price.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} $`;
   } else {
-    return `$${price.toFixed(2)}`;
+    return `${price.toFixed(2)} $`;
   }
 }
 

@@ -55,6 +55,8 @@ const PORT = process.env.PORT || 3000;
 
 // Trust proxy - needed when behind nginx
 app.set("trust proxy", 1);
+// JSON body parser for RPC requests with size limit
+app.use(express.json({ limit: "50kb" }));
 
 // Rate limiting configuration
 const registrationLimiter = rateLimit({
@@ -79,7 +81,7 @@ const registrationLimiter = rateLimit({
 
 const generalLimiter = rateLimit({
   windowMs: 1 * 60 * 1000, // 1 minute
-  max: 300, // Limit each IP to 300 requests per minute
+  max: 600, // Limit each IP to 600 requests per minute
   message: {
     error: "Too many requests from this IP, please slow down.",
   },
@@ -110,12 +112,24 @@ app.use(
   }),
 );
 
-// Additional security headers
+// Additional security headers not covered by Helmet
 app.use((req, res, next) => {
+  // Permissions Policy (formerly Feature-Policy)
   res.setHeader(
     "Permissions-Policy",
-    "geolocation=(), microphone=(), camera=()",
+    "accelerometer=(), camera=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), payment=(), usb=(), interest-cohort=()",
   );
+
+  // Prevent caching of sensitive pages
+  if (req.path.includes("/api/") || req.path.includes("/rpc")) {
+    res.setHeader(
+      "Cache-Control",
+      "no-store, no-cache, must-revalidate, proxy-revalidate",
+    );
+    res.setHeader("Pragma", "no-cache");
+    res.setHeader("Expires", "0");
+  }
+
   next();
 });
 
@@ -144,7 +158,6 @@ app.use(
   }),
 );
 
-app.use(express.json());
 app.use(generalLimiter); // Apply general rate limiting to all routes
 
 // Serve static files from public directory
@@ -229,7 +242,7 @@ app.use((req, res, next) => {
 // Rate Limiting - RPC (restrictive for security)
 const rpcLimiter = rateLimit({
   windowMs: 1 * 60 * 1000, // 1 minute
-  max: 60, // Max 60 RPC requests per minute per IP
+  max: 180, // Max 180 RPC requests per minute per IP
   message: { error: "Too many RPC requests, please slow down." },
   standardHeaders: true,
   legacyHeaders: false,
@@ -270,26 +283,6 @@ function validateRpcParams(method, params) {
     case "sendrawtransaction":
       // Raw tx should be hex
       if (params[0] && !/^[a-fA-F0-9]+$/.test(params[0])) return false;
-      break;
-
-    case "signrawtransactionwithkey":
-      // TODO: Remove this validation if BTCS RPC supports more complex structures in the future
-      // 1st param: Raw tx hex string
-      if (params[0] && !/^[a-fA-F0-9]+$/.test(params[0])) return false;
-      // 2nd param: Array of WIF private keys
-      if (params[1] && Array.isArray(params[1])) {
-        for (const key of params[1]) {
-          // Validate WIF format (base58, typically 51-52 chars)
-          // Adjust regex if btcsWIFs have a specific length or starting character
-          if (
-            typeof key !== "string" ||
-            !/^[1-9A-HJ-NP-Za-km-z]{51,52}$/.test(key)
-          )
-            return false;
-        }
-      } else {
-        return false; // Expected array of keys as second parameter
-      }
       break;
   }
   return true;
@@ -332,9 +325,6 @@ app.post("/btcs-rpc", rpcLimiter, async (req, res) => {
     "estimatesmartfee",
     "scantxoutset",
     "gettxout",
-    "createrawtransaction",
-    "signrawtransactionwithkey",
-    "decoderawtransaction",
     "validateaddress",
     "getaddressinfo",
     "getnetworkinfo",
