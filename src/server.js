@@ -4,6 +4,7 @@ const cors = require("cors");
 const helmet = require("helmet");
 const rateLimit = require("express-rate-limit");
 const path = require("path");
+const crypto = require("crypto");
 const {
   registerDevice,
   unregisterDevice,
@@ -52,6 +53,7 @@ if (!RPC_CONFIG.user || !RPC_CONFIG.password) {
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+const CHAT_FEATURE_ENABLED = process.env.CHAT_FEATURE_ENABLED === "true";
 
 // Trust proxy - needed when behind nginx
 app.set("trust proxy", 1);
@@ -134,27 +136,31 @@ app.use((req, res, next) => {
 });
 
 app.use(
-  cors({
-    origin: function (origin, callback) {
-      const allowedOrigins = [
-        "https://bitcoinsilver.top",
-        "https://www.bitcoinsilver.top",
-      ];
+  cors(function (req, callback) {
+    const origin = req.headers.origin;
+    const allowedOrigins = [
+      "https://bitcoinsilver.top",
+      "https://www.bitcoinsilver.top",
+    ];
+    const corsOptions = {
+      methods: ["GET", "POST"],
+      allowedHeaders: [
+        "Content-Type",
+        "x-api-key",
+        "x-chat-secret",
+        "x-admin-key",
+      ],
+    };
 
-      // !origin allows native apps (like Android), curl, and postman to pass through safely
-      if (!origin || allowedOrigins.indexOf(origin) !== -1) {
-        callback(null, true);
-      } else {
-        callback(new Error("Not allowed by CORS"));
-      }
-    },
-    methods: ["GET", "POST"],
-    allowedHeaders: [
-      "Content-Type",
-      "x-api-key",
-      "x-chat-secret",
-      "x-admin-key",
-    ],
+    // !origin allows native apps (like Android), curl, and postman to pass through safely
+    if (!origin || allowedOrigins.indexOf(origin) !== -1) {
+      callback(null, { ...corsOptions, origin: true });
+    } else {
+      console.warn(
+        `\x1b[31mCORS blocked request from origin: ${origin} (ip: ${req.ip}, ua: ${req.headers["user-agent"]})\x1b[0m`,
+      );
+      callback(new Error("Not allowed by CORS"));
+    }
   }),
 );
 
@@ -231,18 +237,42 @@ const adminApiKeyAuth = (req, res, next) => {
 
 // Request logging middleware
 app.use((req, res, next) => {
+  const incomingRequestId = req.headers["x-request-id"];
+  const requestId =
+    typeof incomingRequestId === "string" && incomingRequestId.trim()
+      ? incomingRequestId.trim()
+      : crypto.randomUUID();
+  req.requestId = requestId;
+  res.setHeader("X-Request-Id", requestId);
+
+  const startedAt = Date.now();
+
   logger.info("Incoming request", {
+    // requestId,                   // re-enable for debugging
     method: req.method,
     path: req.path,
     ip: req.ip,
+    // userAgent: req.headers["user-agent"],
   });
+
+  res.on("finish", () => {
+    logger.info("Request completed", {
+      // requestId,
+      // method: req.method,
+      // path: req.path,
+      statusCode: res.statusCode,
+      // durationMs: Date.now() - startedAt,
+      ip: req.ip,
+    });
+  });
+
   next();
 });
 
 // Rate Limiting - RPC (restrictive for security)
 const rpcLimiter = rateLimit({
   windowMs: 1 * 60 * 1000, // 1 minute
-  max: 180, // Max 180 RPC requests per minute per IP
+  max: 720, // Max 720 RPC requests per minute per IP
   message: { error: "Too many RPC requests, please slow down." },
   standardHeaders: true,
   legacyHeaders: false,
@@ -289,7 +319,16 @@ function validateRpcParams(method, params) {
 }
 
 app.post("/btcs-rpc", rpcLimiter, async (req, res) => {
-  //console.log("DEBUG: Proxy received RPC request", JSON.stringify(req.body)); // <-- Add this for debugging incoming requests
+  const reqWithoutParams = Object.fromEntries(
+    Object.entries(req.body).filter(([key]) => key !== "params"),
+  );
+
+  logger.info("\x1b[33mRPC request\x1b[0m", {
+    method: reqWithoutParams.method,
+    id: reqWithoutParams.id,
+    ip: req.ip,
+  });
+  //console.log("DEBUG RPC request: ", JSON.stringify(req.body)); // <-- Add this for debugging incoming requests
   // CORS headers for web wallet (restricted to bitcoinsilver.top)
   const allowedOrigins = [
     "https://bitcoinsilver.top",
@@ -339,8 +378,8 @@ app.post("/btcs-rpc", rpcLimiter, async (req, res) => {
   }
 
   // Validate parameters
-  const params = req.body.params || [];
-  if (!validateRpcParams(method, params)) {
+  const rpcParams = req.body.params || [];
+  if (!validateRpcParams(method, rpcParams)) {
     return res.status(400).json({ error: "Invalid parameters" });
   }
 
@@ -349,7 +388,7 @@ app.post("/btcs-rpc", rpcLimiter, async (req, res) => {
     jsonrpc: "2.0",
     id: "BTCS-RPC-PROXY",
     method: method,
-    params: params,
+    params: rpcParams,
   });
 
   //console.log("DEBUG: Forwarding to daemon:", rpcRequest); // <-- ADD THIS to log the exact RPC request being sent to the daemon for debugging purposes
@@ -498,6 +537,7 @@ app.post("/api/register", apiKeyAuth, registrationLimiter, async (req, res) => {
       address,
       device_token,
       platform || "android",
+      req.requestId,
     );
 
     res.json({
@@ -528,7 +568,11 @@ app.post("/api/unregister", apiKeyAuth, async (req, res) => {
       });
     }
 
-    const success = await unregisterDevice(address, device_token);
+    const success = await unregisterDevice(
+      address,
+      device_token,
+      req.requestId,
+    );
 
     res.json({
       success: success,
@@ -740,7 +784,12 @@ app.post("/api/price-alerts/enable", apiKeyAuth, async (req, res) => {
       });
     }
 
-    const success = await updatePriceAlertStatus(address, device_token, true);
+    const success = await updatePriceAlertStatus(
+      address,
+      device_token,
+      true,
+      req.requestId,
+    );
 
     if (success) {
       res.json({
@@ -776,7 +825,12 @@ app.post("/api/price-alerts/disable", apiKeyAuth, async (req, res) => {
       });
     }
 
-    const success = await updatePriceAlertStatus(address, device_token, false);
+    const success = await updatePriceAlertStatus(
+      address,
+      device_token,
+      false,
+      req.requestId,
+    );
 
     if (success) {
       res.json({
@@ -1001,292 +1055,325 @@ app.get("/api/peers", async (req, res) => {
   }
 });
 
-// ==================== CHAT ENDPOINTS ====================
-
-/**
- * Get chat message history (Strict Mode: API key + Chat Secret required)
- */
-app.get("/api/chat/history", apiKeyAuth, chatSecretAuth, async (req, res) => {
-  try {
-    const limit = parseInt(req.query.limit) || 100;
-    const offset = parseInt(req.query.offset) || 0;
-
-    const messages = await getChatHistory(limit, offset);
-
-    res.json({
-      success: true,
-      messages: messages.reverse(), // Oldest first
-      count: messages.length,
-    });
-  } catch (error) {
-    logger.error("Get chat history error", { error: error.message });
-    res.status(500).json({
+// Defense-in-depth: keep chat endpoints disabled at app level unless explicitly enabled.
+if (!CHAT_FEATURE_ENABLED) {
+  app.use("/api/chat", (req, res) => {
+    res.status(410).json({
       success: false,
-      error: "Failed to load chat history",
+      error: "Chat feature is disabled",
     });
-  }
-});
+  });
 
-/**
- * Set user nickname (Strict Mode: API key + Chat Secret required)
- */
-app.post(
-  "/api/chat/set-nickname",
-  apiKeyAuth,
-  chatSecretAuth,
-  async (req, res) => {
+  app.use("/api/chat-notifications", (req, res) => {
+    res.status(410).json({
+      success: false,
+      error: "Chat feature is disabled",
+    });
+  });
+}
+
+// ==================== CHAT ENDPOINTS ====================
+if (CHAT_FEATURE_ENABLED) {
+  /**
+   * Get chat message history (Strict Mode: API key + Chat Secret required)
+   */
+  app.get("/api/chat/history", apiKeyAuth, chatSecretAuth, async (req, res) => {
     try {
-      const { wallet_address, nickname } = req.body;
+      const limit = parseInt(req.query.limit) || 100;
+      const offset = parseInt(req.query.offset) || 0;
 
-      if (!wallet_address || !nickname) {
-        return res.status(400).json({
-          success: false,
-          error: "wallet_address and nickname are required",
-        });
-      }
-
-      // Validate nickname length
-      if (nickname.length < 3 || nickname.length > 20) {
-        return res.status(400).json({
-          success: false,
-          error: "Nickname must be between 3 and 20 characters",
-        });
-      }
-
-      // Validate nickname format (alphanumeric and underscores only)
-      if (!/^[a-zA-Z0-9_]+$/.test(nickname)) {
-        return res.status(400).json({
-          success: false,
-          error: "Nickname can only contain letters, numbers, and underscores",
-        });
-      }
-
-      const result = await setUserNickname(wallet_address, nickname);
+      const messages = await getChatHistory(limit, offset);
 
       res.json({
         success: true,
-        nickname: result.nickname,
-        message: "Nickname set successfully",
+        messages: messages.reverse(), // Oldest first
+        count: messages.length,
       });
     } catch (error) {
-      if (error.message.includes("duplicate key")) {
-        return res.status(409).json({
-          success: false,
-          error: "Nickname already taken",
-        });
-      }
-
-      logger.error("Set nickname error", { error: error.message });
+      logger.error("Get chat history error", { error: error.message });
       res.status(500).json({
         success: false,
-        error: "Failed to set nickname",
+        error: "Failed to load chat history",
       });
     }
-  },
-);
+  });
 
-/**
- * Get user nickname (Strict Mode: API key + Chat Secret required)
- */
-app.get(
-  "/api/chat/nickname/:address",
-  apiKeyAuth,
-  chatSecretAuth,
-  async (req, res) => {
+  /**
+   * Set user nickname (Strict Mode: API key + Chat Secret required)
+   */
+  app.post(
+    "/api/chat/set-nickname",
+    apiKeyAuth,
+    chatSecretAuth,
+    async (req, res) => {
+      try {
+        const { wallet_address, nickname } = req.body;
+
+        if (!wallet_address || !nickname) {
+          return res.status(400).json({
+            success: false,
+            error: "wallet_address and nickname are required",
+          });
+        }
+
+        // Validate nickname length
+        if (nickname.length < 3 || nickname.length > 20) {
+          return res.status(400).json({
+            success: false,
+            error: "Nickname must be between 3 and 20 characters",
+          });
+        }
+
+        // Validate nickname format (alphanumeric and underscores only)
+        if (!/^[a-zA-Z0-9_]+$/.test(nickname)) {
+          return res.status(400).json({
+            success: false,
+            error:
+              "Nickname can only contain letters, numbers, and underscores",
+          });
+        }
+
+        const result = await setUserNickname(wallet_address, nickname);
+
+        res.json({
+          success: true,
+          nickname: result.nickname,
+          message: "Nickname set successfully",
+        });
+      } catch (error) {
+        if (error.message.includes("duplicate key")) {
+          return res.status(409).json({
+            success: false,
+            error: "Nickname already taken",
+          });
+        }
+
+        logger.error("Set nickname error", { error: error.message });
+        res.status(500).json({
+          success: false,
+          error: "Failed to set nickname",
+        });
+      }
+    },
+  );
+
+  /**
+   * Get user nickname (Strict Mode: API key + Chat Secret required)
+   */
+  app.get(
+    "/api/chat/nickname/:address",
+    apiKeyAuth,
+    chatSecretAuth,
+    async (req, res) => {
+      try {
+        const { address } = req.params;
+
+        if (!address) {
+          return res.status(400).json({
+            success: false,
+            error: "Address is required",
+          });
+        }
+
+        const nickname = await getUserNickname(address);
+
+        if (nickname) {
+          res.json({
+            success: true,
+            nickname,
+          });
+        } else {
+          res.status(404).json({
+            success: false,
+            error: "Nickname not set",
+          });
+        }
+      } catch (error) {
+        logger.error("Get nickname error", { error: error.message });
+        res.status(500).json({
+          success: false,
+          error: "Failed to get nickname",
+        });
+      }
+    },
+  );
+
+  /**
+   * Get chat statistics
+   */
+  app.get("/api/chat/stats", async (req, res) => {
     try {
-      const { address } = req.params;
+      const stats = await getChatStats();
 
-      if (!address) {
+      res.json({
+        success: true,
+        ...stats,
+      });
+    } catch (error) {
+      logger.error("Get chat stats error", { error: error.message });
+      res.status(500).json({
+        success: false,
+        error: "Failed to get chat stats",
+      });
+    }
+  });
+
+  /**
+   * Update global chat banner message (API key required)
+   */
+  app.post("/api/chat/banner", apiKeyAuth, async (req, res) => {
+    try {
+      const { message } = req.body;
+
+      // websocketServer.updateSystemMessage will handle null/empty as "no message"
+      await websocketServer.updateSystemMessage(message);
+
+      res.json({
+        success: true,
+        message: message ? "Chat banner updated" : "Chat banner cleared",
+      });
+    } catch (error) {
+      logger.error("Failed to update chat banner", { error: error.message });
+      res.status(500).json({
+        success: false,
+        error: "Failed to update chat banner",
+      });
+    }
+  });
+
+  /**
+   * Delete all messages from a specific nickname (Admin only)
+   */
+  app.post("/api/mod/delete-messages", adminApiKeyAuth, async (req, res) => {
+    try {
+      const { nickname } = req.body;
+
+      if (!nickname) {
         return res.status(400).json({
           success: false,
-          error: "Address is required",
+          error: "nickname is required",
         });
       }
 
-      const nickname = await getUserNickname(address);
+      const result = await deleteMessagesByNickname(nickname);
 
-      if (nickname) {
+      if (!result.found) {
+        return res.status(404).json({
+          success: false,
+          error: `User "${nickname}" not found in nicknames or message history`,
+          count: 0,
+        });
+      }
+
+      res.json({
+        success: true,
+        message: `Successfully deleted ${result.count} messages for user "${nickname}"`,
+        count: result.count,
+      });
+    } catch (error) {
+      logger.error("Admin delete messages error", { error: error.message });
+      res.status(500).json({
+        success: false,
+        error: "Failed to delete messages",
+      });
+    }
+  });
+
+  // ==================== CHAT NOTIFICATION ENDPOINTS ====================
+
+  /**
+   * Enable chat notifications for a device
+   */
+  app.post("/api/chat-notifications/enable", apiKeyAuth, async (req, res) => {
+    try {
+      const { address, device_token } = req.body;
+
+      if (!address || !device_token) {
+        return res.status(400).json({
+          success: false,
+          error: "Missing required fields: address, device_token",
+        });
+      }
+
+      const success = await updateChatNotificationStatus(
+        address,
+        device_token,
+        true,
+      );
+
+      if (success) {
         res.json({
           success: true,
-          nickname,
+          message: "Chat notifications enabled successfully",
         });
       } else {
         res.status(404).json({
           success: false,
-          error: "Nickname not set",
+          error: "Device not found",
         });
       }
     } catch (error) {
-      logger.error("Get nickname error", { error: error.message });
+      logger.error("Enable chat notifications error", { error: error.message });
       res.status(500).json({
         success: false,
-        error: "Failed to get nickname",
+        error: "Internal server error",
       });
     }
-  },
-);
+  });
 
-/**
- * Get chat statistics
- */
-app.get("/api/chat/stats", async (req, res) => {
-  try {
-    const stats = await getChatStats();
+  /**
+   * Disable chat notifications for a device
+   */
+  app.post("/api/chat-notifications/disable", apiKeyAuth, async (req, res) => {
+    try {
+      const { address, device_token } = req.body;
 
-    res.json({
-      success: true,
-      ...stats,
-    });
-  } catch (error) {
-    logger.error("Get chat stats error", { error: error.message });
-    res.status(500).json({
-      success: false,
-      error: "Failed to get chat stats",
-    });
+      if (!address || !device_token) {
+        return res.status(400).json({
+          success: false,
+          error: "Missing required fields: address, device_token",
+        });
+      }
+
+      const success = await updateChatNotificationStatus(
+        address,
+        device_token,
+        false,
+      );
+
+      if (success) {
+        res.json({
+          success: true,
+          message: "Chat notifications disabled successfully",
+        });
+      } else {
+        res.status(404).json({
+          success: false,
+          error: "Device not found",
+        });
+      }
+    } catch (error) {
+      logger.error("Disable chat notifications error", {
+        error: error.message,
+      });
+      res.status(500).json({
+        success: false,
+        error: "Internal server error",
+      });
+    }
+  });
+}
+
+// Global error handler - must be registered after all routes.
+// Keeps expected errors (like CORS rejections) to a single log line
+// instead of Express's default full stack trace dump.
+app.use((err, req, res, next) => {
+  if (err.message === "Not allowed by CORS") {
+    return res.status(403).json({ success: false, error: "Not allowed by CORS" });
   }
-});
 
-/**
- * Update global chat banner message (API key required)
- */
-app.post("/api/chat/banner", apiKeyAuth, async (req, res) => {
-  try {
-    const { message } = req.body;
-
-    // websocketServer.updateSystemMessage will handle null/empty as "no message"
-    await websocketServer.updateSystemMessage(message);
-
-    res.json({
-      success: true,
-      message: message ? "Chat banner updated" : "Chat banner cleared",
-    });
-  } catch (error) {
-    logger.error("Failed to update chat banner", { error: error.message });
-    res.status(500).json({
-      success: false,
-      error: "Failed to update chat banner",
-    });
-  }
-});
-
-/**
- * Delete all messages from a specific nickname (Admin only)
- */
-app.post("/api/mod/delete-messages", adminApiKeyAuth, async (req, res) => {
-  try {
-    const { nickname } = req.body;
-
-    if (!nickname) {
-      return res.status(400).json({
-        success: false,
-        error: "nickname is required",
-      });
-    }
-
-    const result = await deleteMessagesByNickname(nickname);
-
-    if (!result.found) {
-      return res.status(404).json({
-        success: false,
-        error: `User "${nickname}" not found in nicknames or message history`,
-        count: 0,
-      });
-    }
-
-    res.json({
-      success: true,
-      message: `Successfully deleted ${result.count} messages for user "${nickname}"`,
-      count: result.count,
-    });
-  } catch (error) {
-    logger.error("Admin delete messages error", { error: error.message });
-    res.status(500).json({
-      success: false,
-      error: "Failed to delete messages",
-    });
-  }
-});
-
-// ==================== CHAT NOTIFICATION ENDPOINTS ====================
-
-/**
- * Enable chat notifications for a device
- */
-app.post("/api/chat-notifications/enable", apiKeyAuth, async (req, res) => {
-  try {
-    const { address, device_token } = req.body;
-
-    if (!address || !device_token) {
-      return res.status(400).json({
-        success: false,
-        error: "Missing required fields: address, device_token",
-      });
-    }
-
-    const success = await updateChatNotificationStatus(
-      address,
-      device_token,
-      true,
-    );
-
-    if (success) {
-      res.json({
-        success: true,
-        message: "Chat notifications enabled successfully",
-      });
-    } else {
-      res.status(404).json({
-        success: false,
-        error: "Device not found",
-      });
-    }
-  } catch (error) {
-    logger.error("Enable chat notifications error", { error: error.message });
-    res.status(500).json({
-      success: false,
-      error: "Internal server error",
-    });
-  }
-});
-
-/**
- * Disable chat notifications for a device
- */
-app.post("/api/chat-notifications/disable", apiKeyAuth, async (req, res) => {
-  try {
-    const { address, device_token } = req.body;
-
-    if (!address || !device_token) {
-      return res.status(400).json({
-        success: false,
-        error: "Missing required fields: address, device_token",
-      });
-    }
-
-    const success = await updateChatNotificationStatus(
-      address,
-      device_token,
-      false,
-    );
-
-    if (success) {
-      res.json({
-        success: true,
-        message: "Chat notifications disabled successfully",
-      });
-    } else {
-      res.status(404).json({
-        success: false,
-        error: "Device not found",
-      });
-    }
-  } catch (error) {
-    logger.error("Disable chat notifications error", { error: error.message });
-    res.status(500).json({
-      success: false,
-      error: "Internal server error",
-    });
-  }
+  logger.error("Unhandled request error", { error: err.message });
+  res.status(500).json({ success: false, error: "Internal server error" });
 });
 
 /**
@@ -1321,15 +1408,21 @@ async function start() {
     const http = require("http");
     const server = http.createServer(app);
 
-    // Initialize WebSocket server
-    websocketServer.createWebSocketServer(server);
+    // Initialize WebSocket server only when chat feature is enabled
+    if (CHAT_FEATURE_ENABLED) {
+      websocketServer.createWebSocketServer(server);
+    }
 
     // Start HTTP server with WebSocket support
     server.listen(PORT, "0.0.0.0", () => {
       logger.info("=".repeat(60));
       logger.info("✓ Bitcoin Silver Notification Backend is running");
       logger.info(`✓ API Server listening on port ${PORT}`);
-      logger.info(`✓ WebSocket Server initialized on /ws`);
+      logger.info(
+        CHAT_FEATURE_ENABLED
+          ? "✓ WebSocket Server initialized on /ws"
+          : "✓ Chat/WebSocket feature is disabled",
+      );
       logger.info(`✓ Health check: http://localhost:${PORT}/health`);
       logger.info(`✓ Environment: ${process.env.NODE_ENV || "development"}`);
       logger.info("✓ Price monitoring: Active (checking every 5 minutes)");

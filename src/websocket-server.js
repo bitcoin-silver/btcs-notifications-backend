@@ -287,15 +287,15 @@ function createWebSocketServer(server) {
 
       if (walletAddress) {
         clients.delete(walletAddress);
-        logger.info("Client disconnected", {
-          address: walletAddress.substring(0, 10) + "...",
+        logger.info("\x1b[31mClient disconnected\x1b[0m", {
+          address: walletAddress,
           activeClients: clients.size,
         });
 
         // Broadcast system message with updated user count
         broadcast({
           type: "system",
-          message: `User left the chat`,
+          message: `${"User"} left the chat`,
           user_count: clients.size,
           timestamp: new Date().toISOString(),
         });
@@ -348,9 +348,9 @@ async function handleAuth(ws, message) {
   // Store connection
   clients.set(wallet_address, ws);
 
-  logger.info("Client authenticated", {
-    address: wallet_address.substring(0, 10) + "...",
-    nickname: nickname || "Anonymous",
+  logger.info("\x1b[34mClient authenticated\x1b[0m", {
+    address: wallet_address,
+    nickname: nickname,
     activeClients: clients.size,
   });
 

@@ -1,5 +1,6 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -97,9 +98,22 @@
             box-shadow: 0 0 10px #ff9800;
         }
 
+        .status-indicator.disabled {
+            background: #9e9e9e;
+            box-shadow: none;
+            animation: none;
+        }
+
         @keyframes pulse {
-            0%, 100% { opacity: 1; }
-            50% { opacity: 0.5; }
+
+            0%,
+            100% {
+                opacity: 1;
+            }
+
+            50% {
+                opacity: 0.5;
+            }
         }
 
         .stat-row {
@@ -146,6 +160,7 @@
         }
     </style>
 </head>
+
 <body>
     <div class="container">
         <div class="header">
@@ -333,11 +348,36 @@
                 // Fetch chat stats
                 try {
                     const chatResponse = await fetch('/api/chat/stats');
-                    const chatData = await chatResponse.json();
 
-                    if (chatData.success) {
-                        document.getElementById('chat-status').className = 'status-indicator online';
+                    if (chatResponse.status === 410) {
+                        document.getElementById('chat-status').className = 'status-indicator disabled';
                         document.getElementById('chat-info').innerHTML = `
+                            <div class="stat-row">
+                                <span class="stat-label">Status</span>
+                                <span class="stat-value">Disabled</span>
+                            </div>
+                            <div class="stat-row">
+                                <span class="stat-label">Reason</span>
+                                <span class="stat-value">code 410</span>
+                            </div>
+                        `;
+                    } else if (!chatResponse.ok) {
+                        document.getElementById('chat-status').className = 'status-indicator offline';
+                        document.getElementById('chat-info').innerHTML = `
+                            <div class="stat-row">
+                                <span class="stat-label">Status</span>
+                                <span class="stat-value">Unavailable</span>
+                            </div>
+                        `;
+                    } else {
+                        const contentType = (chatResponse.headers.get('content-type') || '').toLowerCase();
+                        const chatData = contentType.includes('application/json')
+                            ? await chatResponse.json()
+                            : null;
+
+                        if (chatData && chatData.success) {
+                            document.getElementById('chat-status').className = 'status-indicator online';
+                            document.getElementById('chat-info').innerHTML = `
                             <div class="stat-row">
                                 <span class="stat-label">Total Messages</span>
                                 <span class="stat-value">${chatData.total_messages || 0}</span>
@@ -351,8 +391,15 @@
                                 <span class="stat-value">${chatData.latest_message ? new Date(chatData.latest_message).toLocaleString() : 'N/A'}</span>
                             </div>
                         `;
-                    } else {
-                        throw new Error('Chat stats not available');
+                        } else {
+                            document.getElementById('chat-status').className = 'status-indicator offline';
+                            document.getElementById('chat-info').innerHTML = `
+                                <div class="stat-row">
+                                    <span class="stat-label">Status</span>
+                                    <span class="stat-value">Unavailable</span>
+                                </div>
+                            `;
+                        }
                     }
                 } catch (error) {
                     document.getElementById('chat-status').className = 'status-indicator offline';
@@ -406,4 +453,5 @@
         setInterval(fetchStatus, 30000);
     </script>
 </body>
+
 </html>
