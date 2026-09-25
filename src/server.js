@@ -682,7 +682,7 @@ app.post('/api/test-notification', async (req, res) => {
 /**
  * Broadcast notification to ALL devices
  */
-app.post("/api/broadcast-all", apiKeyAuth, async (req, res) => {
+app.post("/api/broadcast-all", adminApiKeyAuth, async (req, res) => {
   try {
     const { title, body } = req.body;
 
@@ -948,7 +948,7 @@ app.get("/api/price/current", async (req, res) => {
 /**
  * Manually trigger daily price broadcast (admin endpoint for testing)
  */
-app.post("/api/price-broadcast/trigger", apiKeyAuth, async (req, res) => {
+app.post("/api/price-broadcast/trigger", adminApiKeyAuth, async (req, res) => {
   try {
     logger.info("Manual daily price broadcast triggered via API");
 
@@ -1221,7 +1221,7 @@ if (CHAT_FEATURE_ENABLED) {
   /**
    * Update global chat banner message (API key required)
    */
-  app.post("/api/chat/banner", apiKeyAuth, async (req, res) => {
+  app.post("/api/chat/banner", adminApiKeyAuth, async (req, res) => {
     try {
       const { message } = req.body;
 
