@@ -282,6 +282,33 @@ const rpcLimiter = rateLimit({
 // RPC PROXY ENDPOINT (Secure)
 // ============================================
 
+function isBtcsAddress(addr) {
+  if (typeof addr !== "string") return false;
+  // Legacy Base58Check: b, B, 8, 3 prefixes (no lookalikes: 0, O, I, l)
+  const isLegacy = /^[bB83][1-9A-HJ-NP-Za-km-z]{24,33}$/.test(addr);
+  // Bech32 P2WPKH: bs1 prefix, lowercase alphanumeric body
+  const isBech32 = /^bs1[a-z0-9]{39,59}$/.test(addr);
+  return isLegacy || isBech32;
+}
+
+// scantxoutset walks the whole UTXO set and the node runs one scan at a time, so only
+// the shape the wallets send is accepted: ["start", [{ desc: "addr(<address>)" }]].
+// Anything else (several or ranged descriptors, abort/status) could tie up the node.
+function isWalletScan(params) {
+  if (params.length !== 2 || params[0] !== "start") return false;
+  const scanObjects = params[1];
+  if (!Array.isArray(scanObjects) || scanObjects.length !== 1) return false;
+  const obj = scanObjects[0];
+  let desc = obj;
+  if (obj && typeof obj === "object") {
+    if (Object.keys(obj).length !== 1) return false; // no "range"
+    desc = obj.desc;
+  }
+  if (typeof desc !== "string") return false;
+  const m = /^addr\(([^()]+)\)(#[a-z0-9]{8})?$/.exec(desc);
+  return !!m && isBtcsAddress(m[1]);
+}
+
 // RPC parameter validation
 function validateRpcParams(method, params) {
   if (!Array.isArray(params)) return false;
@@ -300,14 +327,11 @@ function validateRpcParams(method, params) {
 
     case "validateaddress":
     case "getaddressinfo":
-      if (params[0]) {
-        const addr = params[0];
-        // Legacy Base58Check: b, B, 8, 3 prefixes (no lookalikes: 0, O, I, l)
-        const isLegacy = /^[bB83][1-9A-HJ-NP-Za-km-z]{24,33}$/.test(addr);
-        // Bech32 P2WPKH: bs1 prefix, lowercase alphanumeric body
-        const isBech32 = /^bs1[a-z0-9]{39,59}$/.test(addr);
-        if (!isLegacy && !isBech32) return false;
-      }
+      if (params[0] && !isBtcsAddress(params[0])) return false;
+      break;
+
+    case "scantxoutset":
+      if (!isWalletScan(params)) return false;
       break;
 
     case "sendrawtransaction":
