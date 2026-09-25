@@ -370,6 +370,7 @@ app.post("/btcs-rpc", rpcLimiter, async (req, res) => {
     "getmempoolinfo",
     "getmininginfo",
     "getrawmempool",
+    "getblockhash",
   ];
 
   const method = req.body.method.toLowerCase();
@@ -1369,7 +1370,9 @@ if (CHAT_FEATURE_ENABLED) {
 // instead of Express's default full stack trace dump.
 app.use((err, req, res, next) => {
   if (err.message === "Not allowed by CORS") {
-    return res.status(403).json({ success: false, error: "Not allowed by CORS" });
+    return res
+      .status(403)
+      .json({ success: false, error: "Not allowed by CORS" });
   }
 
   logger.error("Unhandled request error", { error: err.message });
